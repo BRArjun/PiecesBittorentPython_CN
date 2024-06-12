@@ -1,0 +1,179 @@
+Python has the asyncio package used for asynchronous network and file operations, which seems to be the perfect fit for implementing peer to peer
+file sharing just like Bittorent.
+This is my endeavour at building one myself with help from the internet and some other sources.
+
+Let's go!!!
+
+
+These articles helped me in building this project: 
+https://markuseliasson.se/article/bittorrent-in-python/
+https://markuseliasson.se/article/introduction-to-asyncio/
+
+
+The purpose of the async module introduced in Python 3.4 is to write concurrent and single threaded code without the help of any third party librarieslike Twisted or Tornado.
+
+First let us begin with the difference between concurrency and parallelism.
+
+1. Concurrency implies more than one function running on a single core with overlapping between individual functions without having to be executed at the same time.
+2. Parallelism deals with multiple functions running parallelly on multi core systems.
+
+
+The advantage of single threaded and concurrent code is that no mutable state needs to be managed explicitly and there is no need to coordinate routines.
+
+In asyncio we have:
+1. Event loop : This is resposible for running subprocesses and forms the core of the asynchronous operation. It is responsible for running async tasks.
+
+2. Coroutines : When we declare a function definition with the async keyword it means we are converting that function into a coroutine.
+A coroutine is a kind of generator. The advantage of a coroutine is that its execution can be paused and can be started up at a later point with the scoped variables intact.
+
+3. await : This is the point where the Python code stops and waits for results before moving and stopping at the next await or reaching a return statement.
+
+4. Cooperative multi-tasking: When a coroutine gets stopped at a point the event loop then starts up another coroutine that was paused previously and starts executing it.
+Coroutines will take turns running on the same thread but will not run parallelly.
+
+A .torrent file is responsible for the following:
+1. Regulates how many pieces there are to a file.
+2. How should these be exchanged between peers.
+3. How to check the integrity of the files.
+
+A .torrent file contains info about what is to be downloaded and from where.
+This is also called the meta-info file.
+
+The details in the .torrent file are stored in a sort of binary format called Bencoding.
+It is fairly simple to parse it to a JSON format in Python.
+
+After parsing through this information we connect to the tracker which is a central server that manages all peers connected to a specific torrent.
+We make an announce call to the tracker using the announce property of the .torrent file which provides us the link of the tracker that we want to connect to.
+We make use of some parameters like info_id,downloaded,uploaded,left,port etc.. while writing the request to the tracker.
+
+Then a response comes from the tracker which has two properties of interest:
+1. interval : which says after how much time we can do the next announce call
+2. peers: This is a list of peers that the tracker has assigned us to. This may not be all the peers currently in the swarm.
+A subsequent call may give us another list of peers.
+
+In the code we make use of another library called aiohttp which is responsible for asynchronous HTTP requests and responses.
+The result of using aiohttp is that the event loop is free to schedule other stuff while we have a request to the tracker for the response.
+
+Then we make use of the TorrentClient class that gets the .torrent file passed to it and checks its validity.
+After checking that it is fine, then we call the client.start() function inside an async loop.create_task() to handle work asynchronously.
+
+The TorrentClient class does not only this but also acts like a work coordinator that schedules announce calls and sets up peer connections.
+It starts off with creating an async.Queue object that holds a list of peers that can be connected to.
+
+Then it initiates Peer Connections that eats up peers off the Queue.
+If there are no peers in the Queue then these Peer Connections will wait for the arrival of peers in the Queue hence it is non blocking.
+
+
+To populate the Queue we use the following workflow:
+1. Check if we have downloaded all pieces.
+2. Check if we have cancelled the torrent
+3. Makes an announce call to the tracker if needed.
+4. Add the retrieved peers to the async.Queue object for the Peer Connections to consume.
+5. Else sleep 5 seconds.
+
+So each time an announce call is made to the tracker the peer list is reset and no peers are retrieved then no Peer Connections will run.
+
+
+Then after we succesfully get a peer to get files from the below happens:
+We decode the IP and the port number for a particular peer
+Then the connecting client initiates a TCP connection to the peer.
+
+The first message sent needs to be a Handshake message from the connecting client. Then the remote peer also gives it Handshake message with the following info:
+	1. peer_id
+	2. info_hash
+
+We cross check the info_hash so that it matches with the SHA1 hash of the torrent file we want to download.
+If it is not then we immediately close that connection.
+
+Immediately after sending the Handshake message the remote peer also sends a Bit Field message that serves to inform the client of what pieces the remote peer has.
+The Bit Field message can also be sent from the connecting client to a remote peer but since this is a basic project and does not support seeding we see that we can only recieve Bit Field messages not send them.
+
+The Bit Field message is in the binary format where:
+1. 1 indicates that peer has the piece with that index
+2. 0 indicates that peer does not have that piece
+
+A connecting client starts off in the Choked and Not Interested state where it cannot request any pieces from the remote peer and has no interest in doing so as well.
+
+After sending the Handshake message we send an Interested message to the remote peer to get unchoked and want to start requesting pieces.
+Until the client recieves the Unchoke message the client cannot request pieces from the remote peer and the Peer Connection will be choked 
+
+This is the overall ideal workflow:
+              Handshake
+    client --------------> peer    We are initiating the handshake
+
+              Handshake
+    client <-------------- peer    Comparing the info_hash with our hash
+
+              BitField
+    client <-------------- peer    Might be receiving the BitField
+
+             Interested
+    client --------------> peer    Let peer know we want to download
+
+              Unchoke
+    client <-------------- peer    Peer allows us to start requesting pieces
+
+
+As soon as the client gets unchoked the client starts asking for pieces from the remote peer.
+If we know what pieces the remote peer has we can call the Request method to request pieces from the remote peer.
+If the peer complies then it will send the Piece message where the payload is the actual raw data.
+
+We will have one outstanding Request per peer and politely wait for the Piece message from a remote peer.
+But we will have multiple of these Request messages sent overall as we are connected to more than one remote peer at a time.
+If we do not want a piece then we can send the Cancel message to the remote peer to cancel sending the Piece message.
+
+We have some other messages like :
+Have: which is recieved by a connecting peer at any point of time indicating that the remote peer has got another piece and is avaiable to send it to other peers to download.
+The payload of this message is the piece index.
+Keep Alive: Does not contain payload and can be sent from either side.
+
+We initiate a TCP connecting using the open_connection method which returns a tuple of StreamReader and StreamWriter.
+Once this is done the remote peer will send its Handshake message.
+
+Then once the handshake is recieved the Peer Connection class makes use of an async iterator to return the stream of Peer Messages.
+The Peer Stream Iterator reads data from the Stream Reader and if enough data is present will try to parse and return a Peer Message.
+
+The Bittorent protocol messages have the following format:
+<length><id><payload>
+
+All these messages are decoded using the struct module from Python which allows converting from and to C structs.
+
+All messages are Big Endian in Bittorrent.
+
+A piece is a partial piece of the torrents data.
+All pieces are of equal size except the last piece which might be smaller.
+The piece length is specified in the torrent file and is of the power of 2 usually 512 KB or less.
+
+Since pieces are still too big to be transferred between peers they are further split into blocks. These blocks get transferred between peers.
+A block is 2**14 bytes in size.
+Bittorrent is all about exchanging these blocks between peers.
+Once all blocks for a piece is done then that piece is ready to be sent to other peers( the peers send the Have message to other peers.)
+And once all pieces are done then the downloader transforms in to a seeder.
+
+When a TorrentClient is constructed along with it we construct a PieceManager which is responsible for:
+1. Determing the next block to request.
+2. Persisting recieved blocks to file.
+3. Determine when the download is complete.
+
+The next block is requested using the PieceManager.next_request method which follows the following strategy:
+All pieces are put in a missing list
+When next_request is called, the manager will do one of:
+    Re-request any previously requested block that has timed-out
+    Requst the next block in an ongoing piece
+    Request the first block in the next missing piece
+
+This way we request blocks and pieces in order.
+This project has a very simple way of requesting the pieces but we can make use of some other strategy like rarest piece first which will be healthierfor the peer swarm.
+When a block is recieved it is stored in memory and after recieving all blocks an SHA1 hash is made for the piece.
+If this hash matches the .torrent file info_hash then the piece is written to disk.
+When all pieces are recieved and accounted for using the hash the torrent is said to be completed and all existing TCP connections are closed and thereby exiting the program.
+
+
+Future work:
+Implement seeding by being able to send Bit Field message and Have messages to other remote peers.
+Resume from last left off spot.
+
+
+And that is it.
+This marks the end of my endeavour to create a small Bittorent client of my own.
+Thanks and Bye!!
