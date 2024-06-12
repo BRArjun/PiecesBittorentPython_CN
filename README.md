@@ -30,7 +30,7 @@ Install the needed dependencies and run the unit tests with:
 
 In order to download a torrent file refer to this example:
 ```bash
-  $ python pieces.py -v tests/data/bootfloppy-utils.img.torrent
+python pieces.py -v tests/data/bootfloppy-utils.img.torrent
 ```
 If everything goes well, your torrent should be downloaded and the
 program terminated. You can stop the client using `Ctrl + C`.
